@@ -1,2 +1,2 @@
 # matools
-genomics tools
+genomics tools for the mskilab
