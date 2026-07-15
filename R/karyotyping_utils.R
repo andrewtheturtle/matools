@@ -1,3 +1,10 @@
+#' @import GenomicRanges
+#' @import data.table
+#' @import gUtils
+#' @import gGnome
+
+
+
 #' @name alignment2gw
 #' @title alignment2gw
 #'
@@ -245,8 +252,8 @@ gr.breaks.ordered = function(bps=NULL, query=NULL)
 #' @description
 #' maps a read GRanges to a sequence of node id's built from the reference graph
 #' 
-#' @input gr GRanges object of a single read from BAM
-#' @input gg gGraph object of reference graph that you want to map node.id from
+#' @param gr GRanges object of a single read from BAM
+#' @param gg gGraph object of reference graph that you want to map node.id from
 #' @param gap (default = 2) integer for largest gap size to close
 #' @param inv (defaul = 50) integer for largest inversion interval to toss
 #' @return gWalk object
