@@ -11,6 +11,8 @@
 #' @description
 #' chunk of alignments2gg, run this on a single contig and get the gwalk in ref coords
 #' 
+#' @param alignment GRanges of a single read
+#' @param verbose
 #' @return gWalk object with nodes and edges lifted to reference coordinates
 #' @author Marcin Imielinski, Joe DeRose, Xiaotong Yao, andrew ma
 alignment2gw = function(alignment, verbose = TRUE)
@@ -54,6 +56,7 @@ alignment2gw = function(alignment, verbose = TRUE)
 #' @description
 #' fills in trivial gaps between walk nodes; walks along path and can pad asymmetrically
 #' 
+#' @param gw input gWalk object
 #' @param gap.thresh (default = 2) threshold for gap sizes to be filled
 #' @return gWalk object
 #' @author andrew ma
@@ -90,6 +93,7 @@ pad.walk = function(gw, gap.thresh = 2)
 #' @description
 #' remove trivial inversions under a size threshold for walks
 #' 
+#' @param gw input gWalk object
 #' @param inv.thresh (default = 1) threshold for inversions to be dropped
 #' @return gWalk object
 #' @author andrew ma
