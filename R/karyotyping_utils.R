@@ -13,7 +13,7 @@
 #' chunk of alignments2gg, run this on a single contig and get the gwalk in ref coords
 #' 
 #' @param alignment GRanges of a single read
-#' @param verbose
+#' @param verbose (default = T)
 #' @return gWalk object with nodes and edges lifted to reference coordinates
 #' @author Marcin Imielinski, Joe DeRose, Xiaotong Yao, andrew ma
 alignment2gw = function(alignment, verbose = TRUE)
