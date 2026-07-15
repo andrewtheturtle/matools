@@ -2,5 +2,6 @@
 
 import(GenomicRanges)
 import(data.table)
+import(gChain)
 import(gGnome)
 import(gUtils)

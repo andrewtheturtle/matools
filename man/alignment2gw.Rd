@@ -6,6 +6,9 @@
 \usage{
 alignment2gw(alignment, verbose = TRUE)
 }
+\arguments{
+\item{alignment}{GRanges of a single read}
+}
 \value{
 gWalk object with nodes and edges lifted to reference coordinates
 }

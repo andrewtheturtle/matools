@@ -7,6 +7,8 @@
 rminv.walk(gw, inv.thresh = 1)
 }
 \arguments{
+\item{gw}{input gWalk object}
+
 \item{inv.thresh}{(default = 1) threshold for inversions to be dropped}
 }
 \value{

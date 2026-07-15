@@ -7,6 +7,8 @@
 pad.walk(gw, gap.thresh = 2)
 }
 \arguments{
+\item{gw}{input gWalk object}
+
 \item{gap.thresh}{(default = 2) threshold for gap sizes to be filled}
 }
 \value{
