@@ -6,26 +6,30 @@
 
 
 
-#' @name alignment2gw
-#' @title alignment2gw
+#' @name alignments2gw
+#' @title alignments2gw
 #'
 #' @description
-#' chunk of alignments2gg, run this on a single contig and get the gwalk in ref coords
+#' taken from alignments2gg, spits out intermediate gWalk object w/ nodes + edges lifted to ref coords
 #' 
-#' @param alignment GRanges of a single read
+#' @param alignments GRanges or GRangesList of pooled reads
 #' @param verbose (default = T)
 #' @return gWalk object with nodes and edges lifted to reference coordinates
 #' @author Marcin Imielinski, Joe DeRose, Xiaotong Yao, andrew ma
-alignment2gw = function(alignment, verbose = TRUE)
+alignments2gw = function(alignments, verbose = TRUE)
 {
  
-  if (!inherits(alignment, 'GRanges') || !all(c('qname', 'cigar', 'flag') %in%  names(values(alignment))))
-    stop('alignment input must be GRanges with fields $qname $cigar and $flag')
+  if (inherits(alignments, 'GRangesList') | inherits(alignments, 'CompressedGRangesList')){
+      alignments = grl.unlist(alignments)
+  }
+
+  if (!inherits(alignments, 'GRanges') || !all(c('qname', 'cigar', 'flag') %in%  names(values(alignments))))
+    stop('alignments input must be GRanges with fields $qname $cigar and $flag')
 
   if (verbose)
     message('making cgChain')
 
-  cg = gChain::cgChain(alignment)
+  cg = gChain::cgChain(alignments)
 
   if (verbose)
     message('disjoining query ranges and lifting nodes to reference')
@@ -35,13 +39,23 @@ alignment2gw = function(alignment, verbose = TRUE)
     "strand", "seqlevels", "seqlengths", "isCircular", "start", "end",
     "width", "element")
   values(lgr) = cbind(values(lgr), values(cg)[, setdiff(names(values(cg)), verboten)])
-  grc = gr.disjoin(grbind(lgr, si2gr(gChain::links(cg)$x)))
-  grc$qname = seqnames(grc)
-  gwc = gW(grl = split(grc, seqnames(grc)))
+  
+  # split the links into a GRangesList by read qname
+  grb <- grbind(lgr, si2gr(gChain::links(cg)$x))
+  grl <- split(grb, grb$grl.ix)
+  # then lapply() gr.disjoin() on each read individually, also incorporate the qname mapping here
+  grc <- lapply(grl, function(gr){
+    grd <- gr.disjoin(gr)
+    grd$qname <- unique(gr$qname)   # using gr$qname instead of seqnames(gr) because faster
+    return(grd)
+  })
+  names(grc) <- unlist(lapply(grc, function(gr) unique(gr$qname)))
+
+  gwc = gW(grl = GRangesList(grc))
 
   nodes = gwc$graph$nodes
 
-  grr = gChain::lift(cg, nodes$gr)
+  grr = gChain::lift(cg, nodes$gr)    # map to ref
 
   grr <- grr[order(grr$query.id)]   # just make sure in order
   grw <- gW(grl = split(grr, grr$qname))
@@ -109,7 +123,11 @@ rminv.walk = function(gw, inv.thresh = 1)
 
   # drop the smol inversions
   drop.id <- dt[strand.change & width<=inv.thresh,node.id]
-  new.dt <- dt[-c(drop.id)]
+  if(length(drop.id) > 0) {
+    new.dt <- dt[-c(drop.id)]
+  } else {
+    new.dt <- dt
+  }
   new.gr <- dt2gr(new.dt)
 
   new.gw <- gW(grl = split(new.gr, new.gr$qname))
@@ -241,7 +259,9 @@ gr.breaks.ordered = function(bps=NULL, query=NULL)
        newGr$node_ord = newRange$node_ord                    ## re-attach after the overwrite
 
        intact = query[!mappedQ]
-       intact$node_ord = 1L                                  ## unbroken -> single piece
+       if (length(intact) > 0) {
+         intact$node_ord = 1L                                  ## unbroken -> single piece (sometimes returns empty)
+       }
 
        output = c(newGr, intact)
        output = output[order(output$qid, output$node_ord)]   ## input order; traversal order within
@@ -255,40 +275,61 @@ gr.breaks.ordered = function(bps=NULL, query=NULL)
 #' @title read2node
 #'
 #' @description
-#' maps a read GRanges to a sequence of node id's built from the reference graph
+#' maps reads GRangesList to a sequence of node id's built from the reference graph
 #' 
-#' @param gr GRanges object of a single read from BAM
+#' @param alignments GRangesList or GRanges object of reads from BAM
 #' @param gg gGraph object of reference graph that you want to map node.id from
 #' @param gap (default = 2) integer for largest gap size to close
 #' @param inv (defaul = 50) integer for largest inversion interval to toss
+#' @param verbose (default = TRUE) logical for printing progress messages
 #' @return gWalk object
 #' @author andrew ma
-read2node = function(gr = NULL, gg = NULL, gap = 2, inv = 50)
+reads2node = function(alignments = NULL, gg = NULL, gap = 2, inv = 50, verbose = TRUE)
 {
-  if(!inherits(gr, 'GRanges')) stop("gr must be a GRanges object")
+  if(!inherits(alignments, 'GRangesList') && !inherits(alignments, 'GRanges')) stop("alignments must be a GRangesList or GRanges object")
   if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
 
-  message("converting read into walk...")
-  raw.gw <- alignment2gw(gr)
+  if(verbose) message("converting read into walk...")
+  raw.gws <- alignments2gw(alignments)
 
-  message(sprintf("filling in %s bp gaps in the read walk", gap))
-  pad.gw <- pad.walk(raw.gw, gap.thresh = gap)
-  simp.gw <- pad.gw$copy$simplify()
+  # Will eventually make this run on each read in parallel...
+  ann.gws <- lapply(seq_along(raw.gws), function(i){
+    tryCatch({
+      raw.gw <- raw.gws[i]
+      if(verbose) message(sprintf("processing read %s of %s", i, length(raw.gws)))
+      
+      if(verbose) message(sprintf("filling in %s bp gaps in the read walk", gap))
+      pad.gw <- pad.walk(raw.gw, gap.thresh = gap)
+      simp.gw <- pad.gw$copy$simplify()
 
-  message(sprintf("removing small inversions under %s bp", inv))
-  clean.gw <- rminv.walk(simp.gw, inv.thresh = inv)
+      if(verbose) message(sprintf("removing small inversions under %s bp", inv))
+      clean.gw <- rminv.walk(simp.gw, inv.thresh = inv)
 
-  message("mapping ref gg breakpoints")
-  breaks <- gg$junctions$breakpoints %&% unlist(clean.gw$grl) %>% gr.stripstrand() %>% unique()
-  ann.gr <- gr.breaks.ordered(breaks, unlist(clean.gw$grl))
-  
-  message("annotating with ref gg node.ids")
-  ann.gr <- gr.val(ann.gr, gg$nodes$gr, val = "node.id", FUN = unique)     # shouldn't break so long as each gr in the walk maps to a unique node.id!
-  mcols(ann.gr)$map.node.id = mcols(ann.gr)$node.id
-  
-  message("generating new walk with $map.node.id")
-  ann.gw <- gW(grl = split(ann.gr, ann.gr$qname))
-  ann.gw$mark( label = mcols(unlist(ann.gw$grl))$map.node.id )
+      if(verbose) message("mapping ref gg breakpoints")
+      breaks <- gg$junctions$breakpoints %&% unlist(clean.gw$grl) %>% gr.stripstrand() %>% unique()
+      ann.gr <- gr.breaks.ordered(breaks, unlist(clean.gw$grl))   # bugged
+      
+      if(verbose) message("annotating with ref gg node.ids")
+      ann.gr <- gr.val(ann.gr, gg$nodes$gr, val = "node.id", FUN = unique)     # shouldn't break so long as each gr in the walk maps to a unique node.id!
+      mcols(ann.gr)$map.node.id = mcols(ann.gr)$node.id
+      
+      if(verbose) message("generating new walk with $map.node.id")
+      ann.gw <- gW(grl = split(ann.gr, ann.gr$qname))
+      ann.gw$mark( label = mcols(unlist(ann.gw$grl))$map.node.id )
 
-  return(ann.gw)
+      if(verbose) message(sprintf("returning walk of length %s", ann.gw$dt$length))
+      return(ann.gw)
+
+    }, error = function(e){
+      
+      if(verbose) message(sprintf("Error processing read %s: %s", i, e$message))
+      return(NULL)
+
+    })
+  })
+
+  ann.gr <- grbind(lapply(ann.gws,function(w){unlist(w$grl)}))
+  ann.walkset <- gW(grl = split(ann.gr, ann.gr$qname))
+
+  return(ann.walkset)
 }
