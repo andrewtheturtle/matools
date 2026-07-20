@@ -65,25 +65,27 @@ alignments2gw = function(alignments, verbose = TRUE)
 
 
 
-#' @name pad.walk
-#' @title pad.walk
+#' @name pad.walks
+#' @title pad.walks
 #'
 #' @description
-#' fills in trivial gaps between walk nodes; walks along path and can pad asymmetrically
+#' fills in trivial gaps between nodes for each walk; walks along path and can pad asymmetrically
 #' 
 #' @param gw input gWalk object
 #' @param gap.thresh (default = 2) threshold for gap sizes to be filled
 #' @return gWalk object
 #' @author andrew ma
-pad.walk = function(gw, gap.thresh = 2)
+pad.walks = function(gw, gap.thresh = 2)
 {
   if(!inherits(gw, 'gWalk')) stop("input must be a gWalk object")
 
   dt <- gr2dt(gw$grl)
-  # flip (-) strands and compute gaps
+  # flip (-) strands
   dt[, `:=`( sstart = ifelse((strand == "-"), (end), (start)),
              send   = ifelse((strand == "-"), (start), (end)) )]
-  dt[, gap := abs(sstart - shift(send, 1L)), by = seqnames]
+  
+  # compute gap per walk (qname) > per chr
+  dt[, gap := abs(sstart - shift(send, 1L)), by = c("qname", "seqnames")]
 
   # fill in gaps within the threshold
   dt[!is.na(gap) & gap <= gap.thresh, `:=`( nstart = ifelse((strand == "-"), (sstart + gap-1), (sstart - gap+1)) )]
@@ -93,7 +95,6 @@ pad.walk = function(gw, gap.thresh = 2)
   dt[, `:=`( start  = ifelse((strand == "-"), (send), (nstart)),
              end    = ifelse((strand == "-"), (nstart), (send) ))]
 
-  # (make sure not to change up row order)
   gr <- dt2gr(dt)
   new.gw <- gW(grl = split(gr, gr$qname))
 
@@ -271,65 +272,100 @@ gr.breaks.ordered = function(bps=NULL, query=NULL)
 
 
 
-#' @name read2node
-#' @title read2node
+#' @name reads2node
+#' @title reads2node
 #'
 #' @description
 #' maps reads GRangesList to a sequence of node id's built from the reference graph
 #' 
 #' @param alignments GRangesList or GRanges object of reads from BAM
 #' @param gg gGraph object of reference graph that you want to map node.id from
-#' @param gap (default = 2) integer for largest gap size to close
-#' @param inv (defaul = 50) integer for largest inversion interval to toss
+#' @param gap (default = 50) integer for largest gap size to close
 #' @param verbose (default = TRUE) logical for printing progress messages
 #' @return gWalk object
 #' @author andrew ma
-reads2node = function(alignments = NULL, gg = NULL, gap = 2, inv = 50, verbose = TRUE)
+reads2node = function(alignments = NULL, gg = NULL, gap = 50, verbose = TRUE)
 {
   if(!inherits(alignments, 'GRangesList') && !inherits(alignments, 'GRanges')) stop("alignments must be a GRangesList or GRanges object")
   if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
 
-  if(verbose) message("converting read into walk...")
+  if(verbose) message("converting reads > walks...")
   raw.gws <- alignments2gw(alignments)
 
-  # Will eventually make this run on each read in parallel...
-  ann.gws <- lapply(seq_along(raw.gws), function(i){
-    tryCatch({
-      raw.gw <- raw.gws[i]
-      if(verbose) message(sprintf("processing read %s of %s", i, length(raw.gws)))
-      
-      if(verbose) message(sprintf("filling in %s bp gaps in the read walk", gap))
-      pad.gw <- pad.walk(raw.gw, gap.thresh = gap)
-      simp.gw <- pad.gw$copy$simplify()
+  if(verbose) message(sprintf("...filling in %s bp gaps in the read walk", gap))
+  pad.gws <- pad.walks(raw.gws, gap.thresh = gap)
 
-      if(verbose) message(sprintf("removing small inversions under %s bp", inv))
-      clean.gw <- rminv.walk(simp.gw, inv.thresh = inv)
+  if(verbose) message("...annotating with ref gg node.ids")
+  ann.gr <- gr.val(unlist(pad.gws$grl), gg$nodes$gr, val = "node.id", FUN = unique)
+  mcols(ann.gr)$map.node.id = mcols(ann.gr)$node.id
+  ann.gws <- gW(grl = split(ann.gr, ann.gr$qname))
+  
+  if(verbose) message("...simplifying")
+  simp.gws <- ann.gws$copy$simplify(by = "map.node.id")   # node ids get mismapped during reduction
 
-      if(verbose) message("mapping ref gg breakpoints")
-      breaks <- gg$junctions$breakpoints %&% unlist(clean.gw$grl) %>% gr.stripstrand() %>% unique()
-      ann.gr <- gr.breaks.ordered(breaks, unlist(clean.gw$grl))   # bugged
-      
-      if(verbose) message("annotating with ref gg node.ids")
-      ann.gr <- gr.val(ann.gr, gg$nodes$gr, val = "node.id", FUN = unique)     # shouldn't break so long as each gr in the walk maps to a unique node.id!
-      mcols(ann.gr)$map.node.id = mcols(ann.gr)$node.id
-      
-      if(verbose) message("generating new walk with $map.node.id")
-      ann.gw <- gW(grl = split(ann.gr, ann.gr$qname))
-      ann.gw$mark( label = mcols(unlist(ann.gw$grl))$map.node.id )
-
-      if(verbose) message(sprintf("returning walk of length %s", ann.gw$dt$length))
-      return(ann.gw)
-
-    }, error = function(e){
-      
-      if(verbose) message(sprintf("Error processing read %s: %s", i, e$message))
-      return(NULL)
-
-    })
-  })
-
-  ann.gr <- grbind(lapply(ann.gws,function(w){unlist(w$grl)}))
-  ann.walkset <- gW(grl = split(ann.gr, ann.gr$qname))
-
-  return(ann.walkset)
+  return(simp.gws)
 }
+
+
+
+#' @name drop.nodes.walk
+#' @title drop.nodes.walk
+#'
+#' @description
+#' takes in a gWalk object and drops nodes that are below a specified width threshold
+#' 
+#' @param gws gWalk object
+#' @param width.threshold (default = 50) integer for minimum node width to keep
+#' @return gWalk object
+#' @author andrew ma
+drop.nodes.walk <- function(gws = NULL, width.threshold = 50)
+{
+  if(!inherits(gws, 'gWalk')) stop("gws must be a gWalk object")
+
+  gws.gr <- grl.unlist(gws$grl)
+  mcols(gws.gr)$width <- width(gws.gr)
+  
+  new.gws.gr <- gws.gr[mcols(gws.gr)$width > width.threshold]
+  mcols(new.gws.gr)$width <- NULL
+  
+  new.gws <- gW(grl = split(new.gws.gr, new.gws.gr$qname))
+  
+  return(new.gws)
+}
+
+
+
+# #' @name reads2gg
+# #' @title reads2gg
+# #'
+# #' @description
+# #' pretty much alignments2gg
+# #' but you can drop some nodes
+# #' 
+# #' @param alignments GRangesList or GRanges object of reads from BAM
+# #' @param gg gGraph object of reference graph that you want to map node.id from
+# #' @param gap (default = 50) integer for largest gap size to close
+# #' @param verbose (default = TRUE) logical for printing progress messages
+# #' @return gWalk object
+# #' @author andrew ma
+# reads2node = function(alignments = NULL, gg = NULL, gap = 50, verbose = TRUE)
+# {
+#   if(!inherits(alignments, 'GRangesList') && !inherits(alignments, 'GRanges')) stop("alignments must be a GRangesList or GRanges object")
+#   if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
+
+#   if(verbose) message("converting reads > walks...")
+#   raw.gws <- alignments2gw(alignments)
+
+#   if(verbose) message(sprintf("...filling in %s bp gaps in the read walk", gap))
+#   pad.gws <- pad.walks(raw.gws, gap.thresh = gap)
+
+#   if(verbose) message("...annotating with ref gg node.ids")
+#   ann.gr <- gr.val(unlist(pad.gws$grl), gg$nodes$gr, val = "node.id", FUN = unique)
+#   mcols(ann.gr)$map.node.id = mcols(ann.gr)$node.id
+#   ann.gws <- gW(grl = split(ann.gr, ann.gr$qname))
+  
+#   if(verbose) message("...simplifying")
+#   simp.gws <- ann.gws$copy$simplify(by = "map.node.id")   # node ids get mismapped during reduction
+
+#   return(simp.gws)
+# }
