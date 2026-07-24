@@ -6,6 +6,57 @@
 
 
 
+#' @name smooth.cigar
+#' @title smooth.cigar
+#' 
+#' @description 
+#' makes a smoothed cigar by removing I's and converting D's to M's, all w/in a certain width threshold
+#' 
+#' @param alignments (default = NULL) GRanges or GRangesList of pooled reads
+#' @param smooth.thresh (default = 50) integer for largest deletion size to smooth
+#' @return GRanges or GRangesList of pooled reads with smoothed cigar strings
+#' @author andrew ma
+smooth.cigar = function(alignments = NULL, cigar = NULL, smooth.thresh = 50)
+{
+  if (inherits(alignments, 'GRangesList') | inherits(alignments, 'CompressedGRangesList')){
+      alignments = grl.unlist(alignments)
+  }
+
+  if (!inherits(alignments, 'GRanges') || !all(c('qname', 'cigar', 'flag') %in%  names(values(alignments))))
+    stop('alignments input must be GRanges with fields $qname $cigar and $flag')
+
+  # reads to cigars
+  cigars.dt <- mcols(alignments) %>% as.data.table() %>% .[, .(qname, cigar, flag)]
+
+  # cigar editing: merge I's and D's into M's if they are below a certain threshold; preserves cigar query lens and qwidth
+  ops <- data.table(
+    listid = dunlist(explodeCigarOps(cigars.dt$cigar))$listid,
+    c.str  = as.character(dunlist(explodeCigarOps(cigars.dt$cigar))$V1),
+    c.len  = as.integer(dunlist(explodeCigarOpLengths(cigars.dt$cigar))$V1))
+
+  ops[, mergeable := c.str %in% c("M","=","X") |
+                    (c.str %in% c("I","D") & c.len <= smooth.thresh)]
+  ops[, qlen := fifelse(c.str %in% c("M","=","X","I"), c.len, 0L)]
+  ops[, run  := rleid(mergeable), by = listid]
+
+  new <- ops[, if (mergeable[1L]) .(c.str = "M", c.len = sum(qlen))
+              else               .(c.str = c.str, c.len = c.len),
+            by = .(listid, run)][c.len > 0L]
+
+  agg <- new[, .(cigar = paste0(c.len, c.str, collapse = "")), by = listid]
+  new.cigar <- agg$cigar[match(seq_len(nrow(cigars.dt)), agg$listid)]
+  
+  stopifnot(!anyNA(new.cigar))
+  stopifnot(all(cigarWidthAlongQuerySpace(new.cigar) == mcols(alignments)$qwidth))
+
+  # re-map back to alignments
+  mcols(alignments)$cigar <- new.cigar
+
+  return(alignments)
+}
+
+
+
 #' @name alignments2gw
 #' @title alignments2gw
 #'
@@ -41,23 +92,16 @@ alignments2gw = function(alignments, verbose = TRUE)
   values(lgr) = cbind(values(lgr), values(cg)[, setdiff(names(values(cg)), verboten)])
   
   # split the links into a GRangesList by read qname
-  grb <- grbind(lgr, si2gr(gChain::links(cg)$x))
-  grl <- split(grb, grb$grl.ix)
+  grl <- split(lgr, lgr$qname)
   # then lapply() gr.disjoin() on each read individually, also incorporate the qname mapping here
   grc <- lapply(grl, function(gr){
     grd <- gr.disjoin(gr)
     grd$qname <- unique(gr$qname)   # using gr$qname instead of seqnames(gr) because faster
     return(grd)
   })
-  names(grc) <- unlist(lapply(grc, function(gr) unique(gr$qname)))
+  grc <- grl.unlist(GRangesList(grc))   # unlist the GRangesList back into a single GRanges object
 
-  gwc = gW(grl = GRangesList(grc))
-
-  nodes = gwc$graph$nodes
-
-  grr = gChain::lift(cg, nodes$gr)    # map to ref
-
-  grr <- grr[order(grr$query.id)]   # just make sure in order
+  grr = gChain::lift(cg, grc)    # map to ref
   grw <- gW(grl = split(grr, grr$qname))
  
   return(grw)
@@ -296,8 +340,9 @@ reads2node = function(alignments = NULL, gg = NULL, gap = 50, verbose = TRUE)
   pad.gws <- pad.walks(raw.gws, gap.thresh = gap)
 
   if(verbose) message("...annotating with ref gg node.ids")
-  ann.gr <- gr.val(unlist(pad.gws$grl), gg$nodes$gr, val = "node.id", FUN = unique)
-  mcols(ann.gr)$map.node.id = mcols(ann.gr)$node.id
+  ann.gr <- gr.val(grl.unlist(pad.gws$grl), gg$nodes$gr, val = "node.id", FUN = unique)
+  mcols(ann.gr)$map.node.id = mcols(ann.gr)$node.id                                         # not necessary but if you want to label with diff node id's
+  mcols(ann.gr)$map.snode.id = sign(mcols(ann.gr)$snode.id) * mcols(ann.gr)$map.node.id     #
   ann.gws <- gW(grl = split(ann.gr, ann.gr$qname))
   
   if(verbose) message("...simplifying")
@@ -315,17 +360,17 @@ reads2node = function(alignments = NULL, gg = NULL, gap = 50, verbose = TRUE)
 #' takes in a gWalk object and drops nodes that are below a specified width threshold
 #' 
 #' @param gws gWalk object
-#' @param width.threshold (default = 50) integer for minimum node width to keep
+#' @param width.thresh (default = 50) integer for minimum node width to keep
 #' @return gWalk object
 #' @author andrew ma
-drop.nodes.walk <- function(gws = NULL, width.threshold = 50)
+drop.nodes.walk <- function(gws = NULL, width.thresh = 50)
 {
   if(!inherits(gws, 'gWalk')) stop("gws must be a gWalk object")
 
   gws.gr <- grl.unlist(gws$grl)
   mcols(gws.gr)$width <- width(gws.gr)
   
-  new.gws.gr <- gws.gr[mcols(gws.gr)$width > width.threshold]
+  new.gws.gr <- gws.gr[mcols(gws.gr)$width > width.thresh]
   mcols(new.gws.gr)$width <- NULL
   
   new.gws <- gW(grl = split(new.gws.gr, new.gws.gr$qname))
@@ -335,37 +380,132 @@ drop.nodes.walk <- function(gws = NULL, width.threshold = 50)
 
 
 
-# #' @name reads2gg
-# #' @title reads2gg
-# #'
-# #' @description
-# #' pretty much alignments2gg
-# #' but you can drop some nodes
-# #' 
-# #' @param alignments GRangesList or GRanges object of reads from BAM
-# #' @param gg gGraph object of reference graph that you want to map node.id from
-# #' @param gap (default = 50) integer for largest gap size to close
-# #' @param verbose (default = TRUE) logical for printing progress messages
-# #' @return gWalk object
-# #' @author andrew ma
-# reads2node = function(alignments = NULL, gg = NULL, gap = 50, verbose = TRUE)
-# {
-#   if(!inherits(alignments, 'GRangesList') && !inherits(alignments, 'GRanges')) stop("alignments must be a GRangesList or GRanges object")
-#   if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
+#' @name alignments2gg.d
+#' @title alignments2gg.d
+#'
+#' @description
+#' alignments2gg but can drop nodes below a certain width threshold at gWalk level
+#' 
+#' @param tile GRanges of tiles
+#' @param juncs Junction object or grl coercible to Junctions object
+#' @param genome seqinfo or seqlengths
+#' @return list with gr and edges which can be input into standard gGnome constructor
+#' @author Marcin Imielinski, Joe DeRose, Xiaotong Yao, andrew ma
+alignments2gg.d = function(alignment, width.thresh = 50, verbose = TRUE)
+{
 
-#   if(verbose) message("converting reads > walks...")
-#   raw.gws <- alignments2gw(alignments)
+  if (inherits(alignment, 'GRangesList') | inherits(alignment, 'CompressedGRangesList')){
+      alignment = grl.unlist(alignment)
+  }
+  if (!inherits(alignment, 'GRanges') || !all(c('qname', 'cigar', 'flag') %in%  names(values(alignment))))
+    stop('alignment input must be GRanges with fields $qname $cigar and $flag')
 
-#   if(verbose) message(sprintf("...filling in %s bp gaps in the read walk", gap))
-#   pad.gws <- pad.walks(raw.gws, gap.thresh = gap)
+  if (verbose)
+    message('making cgChain')
 
-#   if(verbose) message("...annotating with ref gg node.ids")
-#   ann.gr <- gr.val(unlist(pad.gws$grl), gg$nodes$gr, val = "node.id", FUN = unique)
-#   mcols(ann.gr)$map.node.id = mcols(ann.gr)$node.id
-#   ann.gws <- gW(grl = split(ann.gr, ann.gr$qname))
+  cg = gChain::cgChain(alignment)
+
+  if (verbose)
+    message('disjoining query ranges and lifting nodes to reference')
+
+  lgr = gChain::links(cg)$x
+  verboten = c("seqnames", "ranges",
+    "strand", "seqlevels", "seqlengths", "isCircular", "start", "end",
+    "width", "element")
+  values(lgr) = cbind(values(lgr), values(cg)[, setdiff(names(values(cg)), verboten)])
+  grc = gr.disjoin(grbind(lgr, si2gr(gChain::links(cg)$x)))
+  grc$qname = seqnames(grc)
+  gwc = gW(grl = split(grc, seqnames(grc)))
+
+  ## lol let's just try this...
+  gwc <- drop.nodes.walk(gwc, width.thresh = width.thresh)
+
+  nodes = gwc$graph$nodes
+  grr = gChain::lift(cg, nodes$gr)
+  grr$insertion = FALSE
+
+  ## add a pad either to the right or left (basically, there should always be mapped sequence on one side on an insertion ..
+  ## otherwise there is no alignment (ie pure insertions means no alignment)
+  ix = setdiff(nodes$gr$node.id, grr$node.id)
+  if (length(ix))
+  {
+    insertions = nodes[ix]$gr
+    start(insertions) = ifelse(start(insertions)>1, start(insertions)-1, start(insertions))
+    end(insertions) = ifelse(start(insertions)== 1 & end(insertions) < seqlengths(insertions)[as.character(seqnames(insertions))],
+                             end(insertions)+1, end(insertions))
+    insertions$insertion = TRUE
+    grr = grbind(grr, gChain::lift(cg, insertions)) ## add the lifted insertions to the pile of intervals
+  }
+
+  ugrr = unique(gr.stripstrand(grr))
+
+  ## there may be dups here if say the lift aligns the contig to both the negative and positive side
+  ## of a contig
+  grr$ugrr.id = match(gr.stripstrand(grr), ugrr)
+  grr$grr.id = 1:length(grr)
+
+  if (any(ugrr$insertion))
+  {
+    width(ugrr[ugrr$insertion]) = 0
+  }
+
+  ## find insertions ie nodes that did not survive the lift
+  edges = gwc$graph$edges$dt
+
+  if (verbose)
+    message('lifting edges to reference')
+
+
+  ## to lift to genome cordinates, merge old edges with new ids (will duplicate edges across multimaps)
+  edges.new = edges %>% merge(gr2dt(grr), by.x = 'n1', by.y = 'node.id', allow.cartesian = TRUE) %>% merge( gr2dt(grr), by.x = 'n2', by.y = 'node.id', allow.cartesian = TRUE)
+  edges.new[, n1 := ugrr.id.x] ## we map to the 
+  edges.new[, n2 := ugrr.id.y]
+
+  ## flip sides for nodes that are flipped (i.e. negative strand) during lift
+  .flip = function(x) c(left = 'right', right = 'left')[x]
+
+  edges.new$n1.side = ifelse(strand(grr)[edges.new$grr.id.x] == '-', .flip(edges.new$n1.side), edges.new$n1.side)
+  edges.new$n2.side = ifelse(strand(grr)[edges.new$grr.id.y] == '-', .flip(edges.new$n2.side), edges.new$n2.side)
+
+  ## now just need to replace any edges to and from an insertion
+  ugrr$loose.left = ugrr$loose.right = NULL
+
+  if (verbose)
+    message('building graph')
   
-#   if(verbose) message("...simplifying")
-#   simp.gws <- ann.gws$copy$simplify(by = "map.node.id")   # node ids get mismapped during reduction
+  return(list(nodes = ugrr, edges = edges.new[, .(n1, n1.side, n2, n2.side)]))
+}
 
-#   return(simp.gws)
-# }
+
+
+#' @name get_readL
+#' @title get_readL
+#'
+#' @description
+#' outputs read length distribution and mean read length from reads (just uses $qwidth param)
+#' 
+#' @param reads GRanges or GRangesList of reads
+#' @return list with read length distribution and mean read length
+#' @author andrew ma
+get_readL <- function(reads)
+{
+  if(inherits(reads,'GRangesList') | inherits(reads, 'CompressedGRangesList')){
+    reads.gr <- grl.unlist(reads)
+  }
+  else if(inherits(reads, 'GRanges')){
+    reads.gr <- reads
+  }
+  else{
+    stop("reads must be a GRanges or GRangesList object")
+  }
+
+  # Get read length distribution and average read length
+  u.reads.gr <- reads.gr[!is.na(mcols(reads.gr)$qwidth)]      # first remove NA qwidth entries
+  u.reads.gr <- u.reads.gr[!duplicated(mcols(u.reads.gr)$qname)]
+  read.lengths <- mcols(u.reads.gr)$qwidth
+  mean.read.length <- mean(read.lengths)
+
+  return(list(read.lengths = read.lengths, mean.read.length = mean.read.length))
+}
+
+
