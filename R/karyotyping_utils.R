@@ -1,4 +1,5 @@
 #' @import GenomicRanges
+#' @import GenomcAlignments
 #' @import data.table
 #' @import gChain
 #' @import gUtils
@@ -16,7 +17,7 @@
 #' @param smooth.thresh (default = 50) integer for largest deletion size to smooth
 #' @return GRanges or GRangesList of pooled reads with smoothed cigar strings
 #' @author andrew ma
-smooth.cigar = function(alignments = NULL, cigar = NULL, smooth.thresh = 50)
+smooth.cigar = function(alignments = NULL, smooth.thresh = 50)
 {
   if (inherits(alignments, 'GRangesList') | inherits(alignments, 'CompressedGRangesList')){
       alignments = grl.unlist(alignments)
