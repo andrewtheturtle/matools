@@ -1,6 +1,6 @@
+#' @import data.table
 #' @import GenomicRanges
 #' @import GenomcAlignments
-#' @import data.table
 #' @import gChain
 #' @import gUtils
 #' @import gGnome
