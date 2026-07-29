@@ -65,10 +65,12 @@ smooth.cigar = function(alignments = NULL, smooth.thresh = 50)
 #' taken from alignments2gg, spits out intermediate gWalk object w/ nodes + edges lifted to ref coords
 #' 
 #' @param alignments GRanges or GRangesList of pooled reads
+#' @param ignore.overlaps (default = T) logical for whether to ignore overlaps in alignments when lifting to reference
+#' @param drop (default = 0) integer for dropping nodes in read space
 #' @param verbose (default = T)
 #' @return gWalk object with nodes and edges lifted to reference coordinates
 #' @author Marcin Imielinski, Joe DeRose, Xiaotong Yao, andrew ma
-alignments2gw = function(alignments, verbose = TRUE)
+alignments2gw = function(alignments, drop = 0, ignore.overlaps = FALSE, verbose = TRUE)
 {
  
   if (inherits(alignments, 'GRangesList') | inherits(alignments, 'CompressedGRangesList')){
@@ -83,9 +85,6 @@ alignments2gw = function(alignments, verbose = TRUE)
 
   cg = gChain::cgChain(alignments)
 
-  if (verbose)
-    message('disjoining query ranges and lifting nodes to reference')
-
   lgr = gChain::links(cg)$x
   verboten = c("seqnames", "ranges",
     "strand", "seqlevels", "seqlengths", "isCircular", "start", "end",
@@ -97,12 +96,40 @@ alignments2gw = function(alignments, verbose = TRUE)
   # then lapply() gr.disjoin() on each read individually, also incorporate the qname mapping here
   grc <- lapply(grl, function(gr){
     grd <- gr.disjoin(gr)
+
+    # toss nodes in read space
+    grd <- grd[width(grd) > drop]
+
     grd$qname <- unique(gr$qname)   # using gr$qname instead of seqnames(gr) because faster
     return(grd)
   })
   grc <- grl.unlist(GRangesList(grc))   # unlist the GRangesList back into a single GRanges object
-
   grr = gChain::lift(cg, grc)    # map to ref
+
+  # disjoin and lift will create new nodes for overlapping alignment records
+  # however, we don't have an automatable heuristic for mapping the overlap to the correct segment based on basepairs
+  # instead, we'll use original link.ids to collapse overlapping segments back to the original link ranges
+  if (ignore.overlaps)
+  {
+    if (verbose)
+      message('>>> mapping back to original links to collapse overlapping segments...')
+
+    mcols(grr)$links.x.ranges <- ranges(gChain::links(cg)$x[mcols(grr)$link.id])
+    mcols(grr)$links.y.ranges <- gChain::links(cg)$y[mcols(grr)$link.id]
+    
+    # create new grr with original link ranges
+    new.grr <- GRanges(seqnames = seqnames(grr), ranges = ranges(mcols(grr)$links.y.ranges), strand = strand(grr))
+    
+    # grr already has the ranges correctly ordered by original link ranges
+    # unique() will collapse to the first instance of each link.id, which should preserve order
+    # grl and query information don't seem to be ordered
+    remove_cols <- c("grl.ix","grl.iix","query.id","query.start","query.end")
+    mcols(new.grr) <- mcols(grr)[, setdiff(names(mcols(grr)), remove_cols)]
+    # if an overlapping segment on the link does not actually align to the reference and we get some bleeding into the next node,
+    # that will be accounted for via junction-based walk constructions downstream (ra.overlaps with a pad)
+    grr <- unique(new.grr)
+  }
+    
   grw <- gW(grl = split(grr, grr$qname))
  
   return(grw)
@@ -510,3 +537,105 @@ get_readL <- function(reads)
 }
 
 
+
+#' @name snap2bps
+#' @title snap2bps
+#' 
+#' @description
+#' snaps a GRanges/GRangesList to a set of breakpoints (bps) within a supplied threshold (pad)
+#' 
+#' @param gr GRanges or GRangesList to be snapped
+#' @param bps GRanges of breakpoints to snap to
+#' @param pad (default = 5) integer for snapping threshold
+#' @return GRanges or GRangesList of snapped ranges
+#' @author andrew ma
+snap2bps <- function(gr, bps, pad = 5)
+{
+  if(inherits(gr,'GRangesList') | inherits(gr, 'CompressedGRangesList')){
+    gr <- grl.unlist(gr)
+  }
+  else if(!inherits(gr, 'GRanges')){
+    stop("gr must be a GRanges or GRangesList object")
+  }
+
+  if(!inherits(bps, 'GRanges')){
+    stop("bps must be a GRanges object")
+  }
+
+  # make sure breakpoints are strandless and unique, then pad
+  bps <- bps %>% gr.stripstrand() %>% unique()
+  bpgr <- bps + pad
+  
+  lgr <- gr.start(gr, ignore.strand = TRUE)     # rightmost base of segments
+  rgr <- gr.end(gr, ignore.strand = TRUE)       # leftmost base of segments
+
+  lov <- gr.findoverlaps(lgr, bpgr, ignore.strand = TRUE)
+  mcols(lov)$type <- "left"
+  rov <- gr.findoverlaps(rgr, bpgr, ignore.strand = TRUE)
+  mcols(rov)$type <- "right"
+
+  # combine overlaps and snap to breakpoints
+  ov <- grbind(lov, rov) %>% gr2dt()
+  ov[, bp := start(bps)[subject.id]]
+  ov[, bpdist := start - bp]
+
+  snap <- ov[bpdist != 0]
+  gdt <- gr2dt(gr)
+  gdt[, idx := .I]
+  gdt[snap[type == "left"], on = .(idx == query.id), start := i.bp]
+  gdt[snap[type == "right"], on = .(idx == query.id), end := i.bp]
+
+  new.gr <- dt2gr(gdt)
+
+  return(new.gr)
+}
+
+
+
+#' @name edgefix
+#' @title edgefix
+#' 
+#' @description
+#' fills in missing edge CN's based on a ref gg's node.id's, then loosefixes output before returning
+#' ! This is used in the context of fixing up a new disjoined graph from the two parents, e.g. gg <- ref.gg$disjoin(nodes$gr)
+#' 
+#' @param gg gGraph object to paste edge CN's onto
+#' @param ref.gg gGraph object to paste edge CN's from
+#' @return gGraph object with pasted edge CN's
+#' @author andrew ma
+edgefix <- function(gg, ref.gg)
+{
+  if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
+  if(!inherits(ref.gg, 'gGraph')) stop("ref.gg must be a gGraph object")
+
+  fix.edges <- gg$edges[is.na(cn)]$dt$edge.id
+  fix.nodes <- gg$edges[fix.edges]$dt$n1        # taking cn from origin node of edge
+  cn.edges <- gg$nodes[fix.nodes]$dt$cn
+
+  new.gg <- gg$copy
+  new.gg$edges[fix.edges]$mark(cn = cn.edges)
+  new.gg <- loosefix(new.gg)
+
+  return(new.gg)
+}
+
+
+
+#' @name get.freeze
+#' @title get.freeze
+#' 
+#' @description
+#' Gets nodes with only REF edges to be frozen in sample.gwalks; returns a vector of the node id's
+#' 
+#' @param gg gGraph object to get frozen nodes from
+#' @return vector of node id's to be frozen
+#' @author andrew ma
+get.freeze <- function(gg)
+{
+  if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
+
+  samp.nodes <- as.vector(as.matrix(gg$edges$dt[gg$edges$dt$type=="ALT",.(n1,n2)]))
+  freeze.nodes <- setdiff(gg$nodes$dt$node.id,samp.nodes)
+
+  return(freeze.nodes)
+}
