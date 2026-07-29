@@ -91,23 +91,21 @@ alignments2gw = function(alignments, drop = 0, ignore.overlaps = TRUE, verbose =
     "width", "element")
   values(lgr) = cbind(values(lgr), values(cg)[, setdiff(names(values(cg)), verboten)])
   
-  # split the links into a GRangesList by read qname
   grl <- split(lgr, lgr$qname)
-  # then lapply() gr.disjoin() on each read individually, also incorporate the qname mapping here
+  # gr.disjoin() on each individual read
   grc <- lapply(grl, function(gr){
     grd <- gr.disjoin(gr)
-
-    # toss nodes in read space
+    
+    ## option to toss small nodes in read space ##
     grd <- grd[width(grd) > drop]
 
-    grd$qname <- unique(gr$qname)   # using gr$qname instead of seqnames(gr) because faster
+    grd$qname <- unique(gr$qname)
     return(grd)
   })
-  grc <- grl.unlist(GRangesList(grc))   # unlist the GRangesList back into a single GRanges object
+  grc <- grl.unlist(GRangesList(grc))
   grr = gChain::lift(cg, grc)    # map to ref
 
-  # disjoin and lift will create new nodes for overlapping alignment records
-  # however, we don't have an automatable heuristic for mapping the overlap to the correct segment based on basepairs
+  # disjoin and lift will create new duplicate nodes for overlapping alignment records, but only one of the two actually aligns
   # instead, we'll use original link.ids to collapse overlapping segments back to the original link ranges
   if (ignore.overlaps)
   {
@@ -120,14 +118,15 @@ alignments2gw = function(alignments, drop = 0, ignore.overlaps = TRUE, verbose =
     # create new grr with original link ranges
     new.grr <- GRanges(seqnames = seqnames(grr), ranges = ranges(mcols(grr)$links.y.ranges), strand = strand(grr))
     
-    # grr already has the ranges correctly ordered by original link ranges
-    # unique() will collapse to the first instance of each link.id, which should preserve order
-    # grl and query information don't seem to be ordered
+    # grl and query information don't seem to be ordered/helpful here
     remove_cols <- c("grl.ix","grl.iix","query.id","query.start","query.end")
     mcols(new.grr) <- mcols(grr)[, setdiff(names(mcols(grr)), remove_cols)]
-    # if an overlapping segment on the link does not actually align to the reference and we get some bleeding into the next node,
-    # that will be accounted for via junction-based walk constructions downstream (ra.overlaps with a pad)
-    grr <- unique(new.grr)
+
+    # dedup on $link.id to avoid collapsing tandem dups or inversions
+    new.grr.dt <- gr2dt(new.grr)
+    new.grr.dt <- new.grr.dt[!duplicated(new.grr.dt$link.id)]
+    new.grr.dt <- new.grr.dt[order(new.grr.dt$qname, new.grr.dt$links.x.ranges.start)]    # ensure order is preserved
+    grr <-  dt2gr(new.grr.dt)
   }
     
   grw <- gW(grl = split(grr, grr$qname))
