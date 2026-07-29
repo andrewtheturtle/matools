@@ -638,3 +638,56 @@ get.freeze <- function(gg)
 
   return(freeze.nodes)
 }
+
+
+
+#' @name map.fine
+#' @title map.fine
+#' 
+#' @description
+#' maps gWalks to a finer reference gGraph's node.id's (e.g. read-disjoined ref graph)
+#' and returns a new gWalk object with the finer node.id's
+#' 
+#' @param gws gWalk object to be mapped
+#' @param gg gGraph object to map to
+#' @param return.gw logical, if TRUE returns a new gWalk object, if FALSE returns a list of mapped snode.id's
+#' @return list of mapped snode.id's or a new gWalk object
+#' @author andrew ma
+map.fine <- function(gws, gg, return.gw = FALSE)
+{
+  if(!inherits(gws, 'gWalk')) stop("gws must be a gWalk object")
+  if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
+
+  qq <- grl.unlist(gws$grl)     # coarse nodes, grl.ix = read walk, grl.iix = node in walk
+  ov <- gr.findoverlaps(qq, gg$nodes$gr, ignore.strand = TRUE)    # we ignore gg's strands
+
+  str <- as.character(strand(qq))[ov$query.id]
+  strand(ov) <- str
+  ov$walk <- qq$grl.ix[ov$query.id]   # walk id number
+  ov$qname <- qq$qname[ov$query.id]   # walk name
+  ov$pos <- qq$grl.iix[ov$query.id]   # position in walk
+  ov$node.id <- gg$nodes$gr$node.id[ov$subject.id]   # node id in fine graph
+
+  # now order by walk, coarse node in walk, then orient finer node id's by strand of coarse node
+  k <- fifelse(str == "-", -start(ov), start(ov))
+  ov <- ov[order(ov$walk, ov$pos, k)]
+
+  # add sign back in for snode.id's
+  ov$snode.id <- fifelse( as.character(strand(ov))=="-",-ov$node.id,ov$node.id )
+
+  # return snode.id's
+  ovdt <- gr2dt(ov)
+  snode.idlist = split(ovdt$snode.id, ovdt$qname)
+
+  out <- snode.idlist
+
+  if(return.gw){
+    # instantiating a new gWalk object will overwrite the snode.ids
+    # instead, we will store the mapped ids in $map.snode.id
+    ov$map.snode.id <- ov$snode.id
+    out <- gW(grl = split(ov, ov$qname))
+  }
+
+  return(out)
+}
+
