@@ -70,7 +70,7 @@ smooth.cigar = function(alignments = NULL, smooth.thresh = 50)
 #' @param verbose (default = T)
 #' @return gWalk object with nodes and edges lifted to reference coordinates
 #' @author Marcin Imielinski, Joe DeRose, Xiaotong Yao, andrew ma
-alignments2gw = function(alignments, drop = 0, ignore.overlaps = FALSE, verbose = TRUE)
+alignments2gw = function(alignments, drop = 0, ignore.overlaps = TRUE, verbose = TRUE)
 {
  
   if (inherits(alignments, 'GRangesList') | inherits(alignments, 'CompressedGRangesList')){
