@@ -51,9 +51,10 @@ smooth.cigar = function(alignments = NULL, smooth.thresh = 50)
   stopifnot(all(cigarWidthAlongQuerySpace(new.cigar) == mcols(alignments)$qwidth))
 
   # re-map back to alignments
-  mcols(alignments)$cigar <- new.cigar
+  new.alignments <- copy(alignments)
+  mcols(new.alignments)$cigar <- new.cigar
 
-  return(alignments)
+  return(new.alignments)
 }
 
 
