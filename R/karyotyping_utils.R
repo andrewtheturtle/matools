@@ -527,12 +527,15 @@ get_readL <- function(reads)
   }
 
   # Get read length distribution and average read length
-  u.reads.gr <- reads.gr[!is.na(mcols(reads.gr)$qwidth)]      # first remove NA qwidth entries
-  u.reads.gr <- u.reads.gr[!duplicated(mcols(u.reads.gr)$qname)]
+  reads.gr <- reads.gr[!is.na(mcols(reads.gr)$qwidth)]      # first remove NA qwidth entries
+  u.reads.gr <- reads.gr[!duplicated(mcols(reads.gr)$qname)]    # dedup by qname
   read.lengths <- mcols(u.reads.gr)$qwidth
   mean.read.length <- mean(read.lengths)
 
-  return(list(read.lengths = read.lengths, mean.read.length = mean.read.length))
+  read.lengths.ls <- read.lengths
+  names(read.lengths.ls) <- mcols(u.reads.gr)$qname
+
+  return(list(read.lengths.ls = read.lengths.ls, mean.read.length = mean.read.length))
 }
 
 
@@ -577,12 +580,17 @@ snap2bps <- function(gr, bps, pad = 5)
   ov <- grbind(lov, rov) %>% gr2dt()
   ov[, bp := start(bps)[subject.id]]
   ov[, bpdist := start - bp]
-
+  # if multiple breakpoints are within the pad width, snap to the closest one
+  ov[, multi:=.N>1, by = query.id]
+  ov[multi==T, bpdist := fifelse(abs(bpdist) == min(abs(bpdist)), bpdist, 0), by = query.id]
   snap <- ov[bpdist != 0]
+  
+  snap <- snap[, .SD[which.min(abs(bpdist))], by = query.id]
   gdt <- gr2dt(gr)
   gdt[, idx := .I]
+  
   gdt[snap[type == "left"], on = .(idx == query.id), start := i.bp]
-  gdt[snap[type == "right"], on = .(idx == query.id), end := i.bp]
+  gdt[snap[type == "right"], on = .(idx == query.id), end := i.bp + 1]
 
   new.gr <- dt2gr(gdt)
 
@@ -651,6 +659,7 @@ get.freeze <- function(gg)
 #' @param gws gWalk object to be mapped
 #' @param gg gGraph object to map to
 #' @param return.gw logical, if TRUE returns a new gWalk object, if FALSE returns a list of mapped snode.id's
+#' @param minsize minimum size of a node to be included in the output
 #' @return list of mapped snode.id's or a new gWalk object
 #' @author andrew ma
 map.fine <- function(gws, gg, return.gw = FALSE)
@@ -659,6 +668,7 @@ map.fine <- function(gws, gg, return.gw = FALSE)
   if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
 
   qq <- grl.unlist(gws$grl)     # coarse nodes, grl.ix = read walk, grl.iix = node in walk
+
   ov <- gr.findoverlaps(qq, gg$nodes$gr, ignore.strand = TRUE)    # we ignore gg's strands
 
   str <- as.character(strand(qq))[ov$query.id]
@@ -691,3 +701,88 @@ map.fine <- function(gws, gg, return.gw = FALSE)
   return(out)
 }
 
+
+
+#' @name jac
+#' @title jac
+#' 
+#' @description
+#' computes the Jaccard index between two sets
+#' 
+#' @param a (vector) first set
+#' @param b (vector) second set
+#' @return Jaccard index
+jac <- function(a, b) length(intersect(a, b)) / length(union(a, b))
+
+
+
+#' @name snap2bps2
+#' @title snap2bps2
+#'
+#' @description
+#' snaps GRanges/GRangesList segment ends onto graph node boundaries implied by a set of
+#' stranded breakpoints (bps), within `pad`. lower (`start`) and upper (`end`) ends snap
+#' independently, EXCEPT when a segment is narrower than `pad` and both ends are in range --
+#' then only the closer end snaps, so a tiny node near one bp isn't collapsed/inverted by
+#' both ends chasing the same boundary.
+#'
+#' @param gr GRanges or GRangesList to be snapped
+#' @param bps GRanges of stranded breakpoints (e.g. gg$junctions$breakpoints)
+#' @param pad (default = 5) integer snapping threshold
+#' @return GRanges of snapped ranges
+#' @author andrew ma
+snap2bps2 <- function(gr, bps, pad = 5)
+{
+  if (inherits(gr, 'GRangesList') | inherits(gr, 'CompressedGRangesList')) {
+    gr <- grl.unlist(gr)
+  } else if (!inherits(gr, 'GRanges')) {
+    stop("gr must be a GRanges or GRangesList object")
+  }
+  if (!inherits(bps, 'GRanges')) stop("bps must be a GRanges object")
+
+  # --- breakpoints -> node-boundary coordinates (STRAND-AWARE) --------------
+  #   '+' bp at p  => node ENDS at p,   node STARTS at p+1
+  #   '-' bp at p  => node STARTS at p, node ENDS   at p-1
+  # >>> if slivers persist specifically on '-' junctions, this ±1 is flipped -- swap it.
+  bp.dt <- data.table(seqnames = as.character(seqnames(bps)),
+                       pos      = start(bps),
+                       str      = as.character(strand(bps)))
+  node.ends   <- rbind(bp.dt[str == "+", .(seqnames, b = pos)],
+                       bp.dt[str == "-", .(seqnames, b = pos - 1L)])
+  node.starts <- rbind(bp.dt[str == "-", .(seqnames, b = pos)],
+                       bp.dt[str == "+", .(seqnames, b = pos + 1L)])
+  node.ends[,   b.match := b]; setkey(node.ends,   seqnames, b)
+  node.starts[, b.match := b]; setkey(node.starts, seqnames, b)
+
+  # --- nearest legal boundary for each end ----------------------------------
+  gdt <- gr2dt(gr)
+  gdt[, `:=`(sn = as.character(seqnames), start0 = start, end0 = end)]
+
+  if (nrow(node.starts))
+    gdt[, ssnap := node.starts[.(sn, start), on = .(seqnames, b), roll = "nearest", x.b.match]]
+  else gdt[, ssnap := NA_integer_]
+  if (nrow(node.ends))
+    gdt[, esnap := node.ends[.(sn, end), on = .(seqnames, b), roll = "nearest", x.b.match]]
+  else gdt[, esnap := NA_integer_]
+
+  # distance of each end to its candidate boundary, and eligibility within pad
+  gdt[, `:=`(s.dist = abs(start - ssnap), e.dist = abs(end - esnap))]
+  gdt[, `:=`(s.elig = !is.na(ssnap) & s.dist <= pad,
+             e.elig = !is.na(esnap) & e.dist <= pad)]
+
+  # small-interval guard: segment narrower than pad with BOTH ends in range ->
+  # snap only the closer end (by distance-to-target); ties -> start.
+  gdt[(end - start + 1L) < pad & s.elig & e.elig & s.dist <= e.dist, e.elig := FALSE]
+  gdt[(end - start + 1L) < pad & s.elig & e.elig & s.dist >  e.dist, s.elig := FALSE]
+
+  gdt[(s.elig), start := ssnap]
+  gdt[(e.elig), end   := esnap]
+
+  # backstop: never let a snap invert or collapse a segment
+  gdt[start > end, `:=`(start = start0, end = end0)]
+
+  drop <- intersect(c("sn","start0","end0","ssnap","esnap","s.dist","e.dist","s.elig","e.elig","width"),
+                    names(gdt))
+  gdt[, (drop) := NULL]
+  dt2gr(gdt, seqinfo = seqinfo(gr))
+}
