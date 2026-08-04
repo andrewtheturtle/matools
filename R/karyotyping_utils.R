@@ -731,7 +731,7 @@ jac <- function(a, b) length(intersect(a, b)) / length(union(a, b))
 #' @param bps GRanges of stranded breakpoints (e.g. gg$junctions$breakpoints)
 #' @param pad (default = 5) integer snapping threshold
 #' @return GRanges of snapped ranges
-#' @author andrew ma
+#' @author andrew ma and claude
 snap2bps2 <- function(gr, bps, pad = 5)
 {
   if (inherits(gr, 'GRangesList') | inherits(gr, 'CompressedGRangesList')) {
@@ -787,3 +787,77 @@ snap2bps2 <- function(gr, bps, pad = 5)
   gdt[, (drop) := NULL]
   dt2gr(gdt, seqinfo = seqinfo(gr))
 }
+
+
+
+#' @name gap_collapse
+#' @title gap_collapse
+#' @description
+#' gap-collapse a set of width-1 breakpoints into representative cut positions
+#' 
+#' @param bp GRanges of width-1 breakpoints
+#' @param gap (default = 50) integer for largest gap size to collapse
+#' @param min.support (default = 3) integer for minimum number of breakpoints to support a cluster
+#' @param ignore.strand (default = TRUE) logical for whether to ignore strand when collapsing
+#' @return GRanges of collapsed breakpoints with metadata col `support` indicating number of breakpoints supporting each collapsed breakpoint
+gap_collapse <- function(bp, gap = 50, min.support = 3L, ignore.strand = TRUE) {
+    stopifnot(inherits(bp, "GRanges"))
+    b   <- granges(bp)                                  # drop mcols, keep seqnames/strand
+    cl  <- GenomicRanges::reduce(b, min.gapwidth = gap, with.revmap = TRUE,
+                                 ignore.strand = ignore.strand)
+    rv  <- cl$revmap                                    # IntegerList: which breakends -> each cluster
+    pos <- start(b)                                     # width-1 => start == breakpoint
+    med <- vapply(rv, function(ix) as.integer(round(median(pos[ix]))), integer(1L))
+    keep <- lengths(rv) >= min.support
+    out  <- GRanges(seqnames(cl), IRanges(med, width = 1L),
+                    strand = if (ignore.strand) "*" else strand(cl))[keep]
+    out$support <- lengths(rv)[keep]
+    out
+}
+
+
+
+#' @name anchored_gap_collapse
+#' @title anchored_gap_collapse
+#' 
+#' @description 
+#' snap read breakpoints onto authoritative anchors first, then gap-cluster the rest
+#' 
+#' @param bp GRanges of width-1 breakpoints
+#' @param anchors GRanges of width-1 breakpoints to snap onto first
+#' @param gap (default = 50) integer for largest gap size to collapse
+#' @param min.support (default = 3) integer for minimum number of breakpoints to support a cluster
+#' @param ignore.strand (default = TRUE) logical for whether to ignore strand when collapsing
+#' @param keep.unsupported.anchors (default = TRUE) logical for whether to keep anchors with no snapped breakpoints
+#' @return GRanges of collapsed breakpoints with support mcol
+anchored_gap_collapse <- function(bp, anchors, gap = 50, min.support = 3L,
+                                  ignore.strand = TRUE,
+                                  keep.unsupported.anchors = TRUE) {
+    b <- granges(bp)
+    a <- granges(anchors)
+    seqlengths(b) <- NA       # tends to error, seqlengths unnecessary anyways
+    seqlengths(a) <- NA
+
+    if (length(a) == 0L)                                   # no anchors -> plain collapse
+        return(gap_collapse(b, gap, min.support, ignore.strand))
+
+    ## nearest anchor for each read breakpoint, then absorb those within `gap`
+    nn  <- nearest(b, a, ignore.strand = ignore.strand)    # index into `a`, NA if none
+    d   <- rep(Inf, length(b))
+    hit <- !is.na(nn)
+    d[hit] <- distance(b[hit], a[nn[hit]], ignore.strand = ignore.strand)
+    absorbed <- hit & d <= gap
+
+    ## anchors keep their EXACT position; support = # reads that snapped to them
+    a$support <- tabulate(nn[absorbed], nbins = length(a))
+    a$anchor  <- TRUE
+    anchor.out <- if (keep.unsupported.anchors) a else a[a$support > 0L]
+
+    ## leftover reads (not near any anchor) cluster among themselves as before
+    novel <- gap_collapse(b[!absorbed], gap = gap, min.support = min.support,
+                          ignore.strand = ignore.strand)
+    novel$anchor <- FALSE
+
+    c(anchor.out, novel)
+}
+
