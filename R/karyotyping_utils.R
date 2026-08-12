@@ -817,8 +817,8 @@ gap_collapse <- function(bp, gap = 50, min.support = 3L, ignore.strand = TRUE) {
 
 
 
-#' @name anchored_gap_collapse
-#' @title anchored_gap_collapse
+#' @name jct_filt
+#' @title jct_filt
 #' 
 #' @description 
 #' snap read breakpoints onto authoritative anchors first, then gap-cluster the rest
@@ -830,7 +830,7 @@ gap_collapse <- function(bp, gap = 50, min.support = 3L, ignore.strand = TRUE) {
 #' @param ignore.strand (default = TRUE) logical for whether to ignore strand when collapsing
 #' @param keep.unsupported.anchors (default = TRUE) logical for whether to keep anchors with no snapped breakpoints
 #' @return GRanges of collapsed breakpoints with support mcol
-anchored_gap_collapse <- function(bp, anchors, gap = 50, min.support = 3L,
+jct_filt <- function(bp, anchors, gap = 50, min.support = 3L,
                                   ignore.strand = TRUE,
                                   keep.unsupported.anchors = TRUE) {
     b <- granges(bp)
@@ -860,4 +860,5 @@ anchored_gap_collapse <- function(bp, anchors, gap = 50, min.support = 3L,
 
     c(anchor.out, novel)
 }
+
 
