@@ -17,6 +17,7 @@ Imports:
     GenomicRanges,
     GenomicAlignments,
     gChain,
+    gTrack,
     GxG,
     gGnome,
     gUtils,

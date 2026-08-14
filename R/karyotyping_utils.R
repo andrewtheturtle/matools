@@ -607,18 +607,15 @@ get_readL <- function(reads)
 #' @title edgefix
 #' 
 #' @description
-#' fills in missing edge CN's based on a ref gg's node.id's, then loosefixes output before returning
-#' ! This is used in the context of fixing up a new disjoined graph from the two parents, e.g. gg <- ref.gg$disjoin(nodes$gr)
+#' fills in missing edge cn (NA after disjoin), then loosefixes output before returning
 #' 
 #' @param gg gGraph object to paste edge CN's onto
-#' @param ref.gg gGraph object to paste edge CN's from
 #' @return gGraph object with pasted edge CN's
 #' @author andrew ma
 #' @export
-edgefix <- function(gg, ref.gg)
+edgefix <- function(gg)
 {
   if(!inherits(gg, 'gGraph')) stop("gg must be a gGraph object")
-  if(!inherits(ref.gg, 'gGraph')) stop("ref.gg must be a gGraph object")
 
   fix.edges <- gg$edges[is.na(cn)]$dt$edge.id
   fix.nodes <- gg$edges[fix.edges]$dt$n1        # taking cn from origin node of edge
@@ -701,6 +698,7 @@ map.fine <- function(gws, gg, return.gw = FALSE)
   if(return.gw){
     # instantiating a new gWalk object will overwrite the snode.ids
     # instead, we will store the mapped ids in $map.snode.id
+    ov$map.node.id <- ov$node.id
     ov$map.snode.id <- ov$snode.id
     out <- gW(grl = split(ov, ov$qname))
   }

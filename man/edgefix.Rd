@@ -4,19 +4,16 @@
 \alias{edgefix}
 \title{edgefix}
 \usage{
-edgefix(gg, ref.gg)
+edgefix(gg)
 }
 \arguments{
 \item{gg}{gGraph object to paste edge CN's onto}
-
-\item{ref.gg}{gGraph object to paste edge CN's from}
 }
 \value{
 gGraph object with pasted edge CN's
 }
 \description{
-fills in missing edge CN's based on a ref gg's node.id's, then loosefixes output before returning
-! This is used in the context of fixing up a new disjoined graph from the two parents, e.g. gg <- ref.gg$disjoin(nodes$gr)
+fills in missing edge cn (NA after disjoin), then loosefixes output before returning
 }
 \author{
 andrew ma
