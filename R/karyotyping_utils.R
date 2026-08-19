@@ -871,3 +871,34 @@ jct_filt <- function(bp, anchors, gap = 50, min.support = 3L,
 }
 
 
+
+#' @name ref_from_gg
+#' @title ref_from_gg
+#' 
+#' @description 
+#' Generate a reference karyotype from an event graph
+#' 
+#' @param gg gGraph object
+#' @param cn (default = 2) integer for the copy number of the reference karyotype
+#' @return gg gGraph that is diploid and unrearranged, with the same nodes
+#' @export
+ref_from_gg <- function(gg, cn=2){
+  ref.nodes <- gg$nodes$gr[,c('node.id')]
+  ref.nodes <- ref.nodes[order(ref.nodes$node.id)]    # just make sure in order by node.id
+  segs <- gg$nodes$gr %>% gr.reduce                   # get disjoint segments/ranges of the nodes    
+  seg.id <- gr.match(ref.nodes, segs)
+
+  n <- length(ref.nodes)
+  adj <- seg.id[-n] == seg.id[-1]                     # represent disjoint ranges as adjacencies
+  edges <- data.table(n1=which(adj), n2=which(adj)+1, n1.side="right", n2.side="left")
+  
+  message("building reference gg...")
+  ref.gg <- gG(nodes = ref.nodes, edges = edges)
+  ref.gg$nodes$mark(cn=cn)
+  ref.gg$edges$mark(cn=cn)
+
+  ref.kar <- ref.gg$walks()
+  # marking cn doesn't seem to incorporate cn here, so add the walks
+  ref.kar <- do.call(c, replicate(cn, ref.kar, simplify=FALSE))
+  return(ref.kar)
+}

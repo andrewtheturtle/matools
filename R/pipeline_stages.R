@@ -175,7 +175,7 @@ compare_kars <- function(pr, eid, prdt, rank.a = 1, rank.b = -1,
     ib <- idx(rank.b)
     ka <- e$e.ll.dt$kar[ia]
     kb <- e$e.ll.dt$kar[ib]                        # names retained
-    fn <- function(tag, ext) paste0(PLOTDIR, tag, "_", pr, "_", eid, ext)
+    fn <- function(tag, ext) paste0(PLOTDIR, tag, "_",rank.a,"-",rank.b,"_", pr, "_", eid, ext)
 
     p <- e$e.plist[[ka]]
     q <- e$e.plist[[kb]]
@@ -227,11 +227,19 @@ compare_kars <- function(pr, eid, prdt, rank.a = 1, rank.b = -1,
 
     # sampled-read null: does observed separation exceed chance
     N.reads <- length(e$e.gw)
-    llr <- function(s) sum(log(p[s])) - sum(log(q[s]))
-    pr_ratios <- vapply(1:NSAMP, function(x) llr(sample(names(p), N.reads, prob=p, replace=TRUE)), numeric(1))
-    qr_ratios <- vapply(1:NSAMP, function(x) llr(sample(names(q), N.reads, prob=q, replace=TRUE)), numeric(1))
+    ll <- function(s) c(a = sum(log(p[s])), b = sum(log(q[s])))          # loglik under ka, kb
+    p.samp <- vapply(1:NSAMP, function(x) ll(sample(names(p), N.reads, prob=p, replace=TRUE)), numeric(2))  # reads ~ ka
+    q.samp <- vapply(1:NSAMP, function(x) ll(sample(names(q), N.reads, prob=q, replace=TRUE)), numeric(2))  # reads ~ kb
+    pr_ratios <- p.samp["a",] - p.samp["b",]
+    qr_ratios <- q.samp["a",] - q.samp["b",]
     err <- (sum(pr_ratios <= 0) + sum(qr_ratios >= 0)) / (2*NSAMP)
     pq  <- data.table(ratio=c(pr_ratios,qr_ratios), type=rep(c(ka,kb), each=NSAMP))
+    # avg loglik of synthetic read sets under the karyotype that generated them
+    avg.ll.a <- mean(p.samp["a",])   # reads ~ ka, scored under ka
+    avg.ll.b <- mean(q.samp["b",])   # reads ~ kb, scored under kb
+    # also emit std dev
+    sd.ll.a <- sd(p.samp["a",])
+    sd.ll.b <- sd(q.samp["b",])
     ggsave(ggplot(pq, aes(x=ratio, fill=type)) +
              geom_histogram(bins=30, position="identity", alpha=0.5) +
              geom_vline(xintercept=sum(dll.dt$dll), color="black", linetype="dashed") +
@@ -241,12 +249,13 @@ compare_kars <- function(pr, eid, prdt, rank.a = 1, rank.b = -1,
            filename=fn("samp_llr_hist",".png"), width=7, height=4)
 
     list(pr=pr, eid=eid, kar.a=ka, kar.b=kb, rank.a=rank.a, rank.b=rank.b,
-         obs.sll=sum(dll.dt$dll), error_rate=err, N.reads=N.reads)
+         comp.llr=sum(dll.dt$dll), samp.avg.ll.a=avg.ll.a, samp.avg.ll.b=avg.ll.b, samp.sd.ll.a=sd.ll.a, samp.sd.ll.b=sd.ll.b,
+         samp.avg.llr = mean(pq$ratio), samp.sd.llr = sd(pq$ratio), error_rate=err, N.reads=N.reads)
 }
 
 #' @export
 score_others <- function(pr, eid, prdt, pairs.dt, rank.self = 1,
-                         PLOTDIR, N_WALKS = 100, seed = 1){
+                         PLOTDIR, OUTDIR, N_WALKS = 100, seed = 1){
     e <- load_event(pr, eid, prdt)
     others.prs <- setdiff(prdt$pair, pr)
 
@@ -274,6 +283,10 @@ score_others <- function(pr, eid, prdt, pairs.dt, rank.self = 1,
     }
     self.dis  <- disjoin_on_union(e$e.dis)
     other.dis <- lapply(o.raw, function(g) disjoin_on_union(g))
+
+    master.dis    <- c(setNames(list(self.dis), pr), other.dis)
+    disgraph.path <- paste0(OUTDIR, "master_disjoin_", pr, "_", eid, ".rds")
+    staveRDS(master.dis, file = disgraph.path)                                      # save disjoined graphs
 
     message("plotting union disjoin graphs...")
     p.gt <- c(self.dis$gtrack(name=pr, labels.suppress.grl=TRUE),
@@ -322,6 +335,9 @@ score_others <- function(pr, eid, prdt, pairs.dt, rank.self = 1,
 
     master <- c(setNames(list(k.self), pr), others)
     lapply(master, function(k) k$nodes$mark(label = k$nodes$dt$node.id))
+    master.path <- paste0(OUTDIR, "master_kars_", pr, "_", eid, ".rds")
+    staveRDS(master, file = master.path)                                            # save karyotypes
+
     message("scoring master set...")
     pd <- readdist_probdist(master,
                             readL_vec = get_readL(e$e.rs)$read.lengths.ls,
@@ -344,5 +360,8 @@ score_others <- function(pr, eid, prdt, pairs.dt, rank.self = 1,
     list(summary = data.table(pair=pr, ev.id=eid, sample=names(sll),
                               is.self = names(sll)==pr, rank.self=rank.self,
                               sumloglik=sll),
+         disgraph.path = disgraph.path,
+         master.path = master.path,
          multi.kar.doc = rbindlist(doc))
 }
+
