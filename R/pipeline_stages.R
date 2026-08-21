@@ -139,13 +139,24 @@ plot_event_matrix <- function(pr, eid, prdt, plotdir){
     # karyotypes
     kar.h <- max(14, 2 + 0.4 * length(e$e.kars))
     e$e.dis$nodes$mark(label = e$e.dis$nodes$dt$node.id)
-    lapply(e$e.kars, function(k) k$nodes$mark(label = k$nodes$dt$node.id))
-    p.w  <- lapply(seq_along(e$e.kars), function(j)
-              e$e.kars[[j]]$gtrack(name=names(e$e.kars)[j], gr.colorfield="label",
-                                   cex.label=2, labels.suppress.grl=TRUE))
-    p.gt <- c(e$e.dis$gtrack(name="e.dis", gr.colorfield="label", cex.label=2,
-                             labels.suppress.grl=TRUE), do.call(c, p.w))
-    ppdf(plot(p.gt, e$e.gr), width=10, height=kar.h, filename=fn("karyotypes",".pdf"))
+    p.kars <- lapply(e$e.kars, function(k) {
+        pk <- k$copy
+        pk$nodes$mark(label = pk$nodes$dt$node.id)
+        pk$edges$mark(col=alpha("red",0.4), lwd=2)
+        pk
+    })
+    names(p.kars) <- names(e$e.kars)
+    p.dis <- e$e.dis$copy
+    p.dis$nodes$mark(label = p.dis$nodes$dt$node.id)
+    p.dis$edges[type=="ALT"]$mark(col=alpha("red",0.4))
+    ymin <- min(p.dis$nodes$gr$cn) - 1
+    ymax <- max(p.dis$nodes$gr$cn) + 1
+    p.w  <- lapply(seq_along(p.kars), function(j)
+              p.kars[[j]]$gtrack(name=names(p.kars)[j], gr.colorfield="node.id",border="black",lwd=1.5,stack.gap=1,
+                                   labels.suppress=T, labels.suppress.grl=TRUE))
+    p.gt <- c(p.dis$gtrack(name="Disjoin gG", gr.colorfield="node.id",border="black",ywid=0.4, lwd=2,stack.gap=2,y0=ymin,y1=ymax,
+                             labels.suppress=T,labels.suppress.grl=TRUE), do.call(c, p.w))
+    ppdf(plot(p.gt, e$e.gr,legend.params=list(plot=F)), width=7, height=kar.h, filename=fn("karyotypes",".pdf"))
 
     # read-length dist (read.lengths.ls is a named vector — no unlist)
     rdst <- get_readL(e$e.rs)
@@ -156,6 +167,7 @@ plot_event_matrix <- function(pr, eid, prdt, plotdir){
               scale_x_log10() +
               labs(title=paste0(pr,", ev ",eid," read len"), x="read length (bp)", y="count")
     ggsave(r.hist, filename=fn("readL_dist",".png"), width=5, height=4)
+    ggsave(r.hist, filename=fn("readL_dist",".pdf"), width=5, height=4)
     invisible(NULL)
 }
 
@@ -167,7 +179,7 @@ rank_kars <- function(pr, eid, prdt, n = 10){
 
 #' @export
 compare_kars <- function(pr, eid, prdt, rank.a = 1, rank.b = -1,
-                         PLOTDIR, NSAMP = 1000){
+                         PLOTDIR, NSAMP = 1000, PAD=50){
     e <- load_event(pr, eid, prdt)
     ord <- order(-e$e.ll.dt$sumloglik)                                      # rank 1 = best
     idx <- function(r) if (r < 0) ord[length(ord) + r + 1] else ord[r]      # -1 = worst
@@ -181,14 +193,17 @@ compare_kars <- function(pr, eid, prdt, rank.a = 1, rank.b = -1,
     q <- e$e.plist[[kb]]
     ravg <- round(get_readL(e$e.rs)$mean.read.length)
 
-    # per-read LLR (a vs b)
+    # --------------------------- first calculate per-read LLR (a vs b) --------------------------------- #
     d       <- log(p) - log(q)
     dll.dt  <- data.table(dll = d[unlist(e$map$words)], word = unlist(e$map$words))
     ggsave(ggplot(dll.dt, aes(x=dll)) + geom_histogram(bins=30) +
-             labs(title=paste0("LLR ", ka, "/", kb), x="llr", y="count"),
-           filename=fn("loglik_hist",".png"), width=7, height=4)
+             labs(title=paste0("LLR rank ", rank.a, "/", rank.b), x="llr", y="count"),
+           filename=fn("loglik_hist",".png"), width=5, height=4)
+    ggsave(ggplot(dll.dt, aes(x=dll)) + geom_histogram(bins=30) +
+             labs(title=paste0("LLR rank ", rank.a, "/", rank.b), x="llr", y="count"),
+           filename=fn("loglik_hist",".pdf"), width=5, height=4)
 
-    # show top differentiating reads vs. uninformative reads
+    # ------------------------- show top differentiating reads vs. uninformative reads ------------------ #
     # canonical key invariant to RC (RC = -rev): min(fwd, -rev) as pipe-string
     rc_canon <- function(s) {
         f <- paste(s,       collapse="|")
@@ -201,31 +216,78 @@ compare_kars <- function(pr, eid, prdt, rank.a = 1, rank.b = -1,
                        function(w) rc_canon(as.integer(strsplit(w, "\\|")[[1]])),
                        character(1))
     ord      <- order(-word.dll)
-    top.words   <- names(word.dll)[ord][!duplicated(canon[ord])][1:5]
-    uninf.words <- names(word.dll)[order(abs(word.dll))]
-    uninf.words <- setdiff(uninf.words, top.words)[1:5]
+    top.words   <- names(word.dll)[ord][!duplicated(canon[ord])][1:5]           # decreasing -LL
+    all.uninf.words <- names(word.dll)[order(abs(word.dll))]                    # increasing |LL|
+    all.uninf.words <- all.uninf.words[abs(word.dll[all.uninf.words]) < 1]      # filter to those with |LL| < 1 -- interpret these w/ grain of salt
+    uninf.words <- setdiff(all.uninf.words, top.words)[1:5]
     # first read matching each chosen word
     first_read <- function(w) names(e$map$words)[match(w, unlist(e$map$words))]
     top.reads   <- vapply(top.words,   first_read, character(1))
     uninf.reads <- vapply(uninf.words, first_read, character(1))
+    all.uninf.reads <- vapply(all.uninf.words, first_read, character(1))
+    
+    e$map$gw$nodes$mark(label = e$map$gw$nodes$dt$map.node.id)              # this needs to be done first for proper labeling
     top.gw   <- e$map$gw[name %in% top.reads]
     uninf.gw <- e$map$gw[name %in% uninf.reads]
+    all.uninf.gw <- e$map$gw[name %in% all.uninf.reads]
 
-    top.gw$nodes$mark(label = top.gw$nodes$dt$map.node.id)                  # highlight informative reads
-    uninf.gw$nodes$mark(label = uninf.gw$nodes$dt$map.node.id)
     e$e.kars[[ka]]$nodes$mark(label = e$e.kars[[ka]]$nodes$dt$node.id)
     e$e.kars[[kb]]$nodes$mark(label = e$e.kars[[kb]]$nodes$dt$node.id)
     
-    p1.gt <- c(e$e.kars[[kb]]$gtrack(name=paste0("rank ",rank.b," (",kb,")"), cex.label=2, gr.colorfield="node.id", labels.suppress.grl=TRUE),
-              top.gw$gtrack(name="top reads", cex.label=2, gr.colorfield="map.node.id", labels.suppress.grl=TRUE),
-              e$e.kars[[ka]]$gtrack(name=paste0("rank ",rank.a," (",ka,")"), cex.label=2, gr.colorfield="node.id", labels.suppress.grl=TRUE))
-    p2.gt <- c(e$e.kars[[kb]]$gtrack(name=paste0("rank ",rank.b," (",kb,")"), cex.label=2, gr.colorfield="node.id", labels.suppress.grl=TRUE),
-              uninf.gw$gtrack(name="uninformative reads", cex.label=2, labels.suppress.grl=TRUE),
-              e$e.kars[[ka]]$gtrack(name=paste0("rank ",rank.a," (",ka,")"), cex.label=2, gr.colorfield="node.id", labels.suppress.grl=TRUE))
-    ppdf(plot(p1.gt, e$e.gr), width=10, height=14, filename=fn("topreads",".pdf"))
-    ppdf(plot(p2.gt, e$e.gr), width=10, height=14, filename=fn("uninf-reads",".pdf"))
+    p1.gt <- c(e$e.kars[[kb]]$gtrack(name=paste0("rank ",rank.b," (",kb,")"), gr.colorfield="label", lwd=2,border="black",
+                                     labels.suppress=T, labels.suppress.grl=TRUE),
+              top.gw$gtrack(name="top reads", gr.colorfield="label", lwd=2,border="black",
+                            labels.suppress=T, labels.suppress.grl=TRUE),
+              e$e.kars[[ka]]$gtrack(name=paste0("rank ",rank.a," (",ka,")"), gr.colorfield="label", lwd=2,border="black",
+                                    labels.suppress=T, labels.suppress.grl=TRUE))
+    p2.gt <- c(e$e.kars[[kb]]$gtrack(name=paste0("rank ",rank.b," (",kb,")"), gr.colorfield="label", lwd=2,border="black",
+                                     labels.suppress=T, labels.suppress.grl=TRUE),
+              uninf.gw$gtrack(name="uninf reads", gr.colorfield="label", lwd=2,border="black",
+                            labels.suppress=T, labels.suppress.grl=TRUE),
+              e$e.kars[[ka]]$gtrack(name=paste0("rank ",rank.a," (",ka,")"), gr.colorfield="label", lwd=2,border="black",
+                                    labels.suppress=T, labels.suppress.grl=TRUE))
+    p3.gt <- c(e$e.kars[[kb]]$gtrack(name=paste0("rank ",rank.b," (",kb,")"), gr.colorfield="label", lwd=2,border="black",
+                                     labels.suppress=T, labels.suppress.grl=TRUE),
+              all.uninf.gw$gtrack(name="all uninf reads", gr.colorfield="label", lwd=2,border="black",
+                            labels.suppress=T, labels.suppress.grl=TRUE),
+              e$e.kars[[ka]]$gtrack(name=paste0("rank ",rank.a," (",ka,")"), gr.colorfield="label", lwd=2,border="black",
+                                    labels.suppress=T, labels.suppress.grl=TRUE))
 
-    # sampled-read null: does observed separation exceed chance
+    ppdf(plot(p1.gt, e$e.gr, legend.params=list(plot=F)), width=6, height=9, filename=fn("topreads",".pdf"))
+    ppdf(plot(p2.gt, e$e.gr,legend.params=list(plot=F)), width=6, height=9, filename=fn("uninf-reads",".pdf"))
+    ppdf(plot(p3.gt, e$e.gr,legend.params=list(plot=F)), width=6, height=9, filename=fn("alluninf-reads",".pdf"))
+
+    # -------------------- now also plot top ALT junction-spanning reads ------------------------------ #
+    read.gg <- e$map$gw$graph
+    evt.jj  <- e$e.dis$junctions[type == "ALT"]
+    ov      <- as.data.table(ra.overlaps(read.gg$junctions$grl, evt.jj$grl, pad = PAD))
+
+    if (nrow(ov) == 0) {
+        message("no ALT-junction-spanning reads")
+    } else {
+        span.reads <- unique(mcols(grl.unlist(read.gg$junctions$grl[ov$ra1.ix]))$qname)
+
+        # ALT words, restricted to spanning reads, collapsed RC
+        span.words <- unlist(e$map$words[span.reads])
+        canon.s    <- vapply(span.words, function(w)
+                         rc_canon(as.integer(strsplit(w, "\\|")[[1]])), character(1))
+        alt.words  <- span.words[!duplicated(canon.s)]
+        alt.words  <- alt.words[order(-abs(d[alt.words]))]      # rank by dll
+        alt.words  <- alt.words[seq_len(min(5, length(alt.words)))]   # up to 5 — may be fewer
+
+        alt.reads  <- vapply(alt.words, first_read, character(1))
+        alt.gw     <- e$map$gw[name %in% alt.reads]
+
+        p4.gt <- c(e$e.kars[[kb]]$gtrack(name=paste0("rank ",rank.b," (",kb,")"), gr.colorfield="label", lwd=2,border="black",
+                                         labels.suppress=T, labels.suppress.grl=TRUE),
+                   alt.gw$gtrack(name="ALT reads", gr.colorfield="label", lwd=2,border="black",
+                                 labels.suppress=T, labels.suppress.grl=TRUE),
+                   e$e.kars[[ka]]$gtrack(name=paste0("rank ",rank.a," (",ka,")"), gr.colorfield="label", lwd=2,border="black",
+                                         labels.suppress=T, labels.suppress.grl=TRUE))
+        ppdf(plot(p4.gt, e$e.gr, legend.params=list(plot=F)), width=6, height=9, filename=fn("alt-spanning-reads",".pdf"))
+    }
+
+    # -------------------------- sampled-read distributions --------------------------------------- #
     N.reads <- length(e$e.gw)
     ll <- function(s) c(a = sum(log(p[s])), b = sum(log(q[s])))          # loglik under ka, kb
     p.samp <- vapply(1:NSAMP, function(x) ll(sample(names(p), N.reads, prob=p, replace=TRUE)), numeric(2))  # reads ~ ka
@@ -240,13 +302,14 @@ compare_kars <- function(pr, eid, prdt, rank.a = 1, rank.b = -1,
     # also emit std dev
     sd.ll.a <- sd(p.samp["a",])
     sd.ll.b <- sd(q.samp["b",])
-    ggsave(ggplot(pq, aes(x=ratio, fill=type)) +
+    comp.plot <- ggplot(pq, aes(x=ratio, fill=type)) +
              geom_histogram(bins=30, position="identity", alpha=0.5) +
              geom_vline(xintercept=sum(dll.dt$dll), color="black", linetype="dashed") +
              annotate("label", x=-Inf, y=Inf, label=paste0("samples=",NSAMP,"\nreads=",N.reads,"\nerr=",round(err,4)),
                       hjust=0, vjust=1, size=8/.pt) +
-             labs(title="sampled-read LLR null", x=paste0("llr ",ka,"/",kb), y="count"),
-           filename=fn("samp_llr_hist",".png"), width=7, height=4)
+             labs(title="sampled-read LLR null", x=paste0("llr rank ",rank.a,"/",rank.b), y="count")
+    ggsave(comp.plot, filename=fn("samp_llr_hist",".png"), width=5, height=4)
+    ggsave(comp.plot, filename=fn("samp_llr_hist",".pdf"), width=5, height=4)
 
     list(pr=pr, eid=eid, kar.a=ka, kar.b=kb, rank.a=rank.a, rank.b=rank.b,
          comp.llr=sum(dll.dt$dll), samp.avg.ll.a=avg.ll.a, samp.avg.ll.b=avg.ll.b, samp.sd.ll.a=sd.ll.a, samp.sd.ll.b=sd.ll.b,
@@ -352,9 +415,9 @@ score_others <- function(pr, eid, prdt, pairs.dt, rank.self = 1,
     ppdf(plot(p.lab, e$e.gr), width=10, height=14,
          filename=paste0(PLOTDIR, "master_kars_", pr, "_", eid, ".pdf"))
     p.nol <- do.call(c, lapply(seq_along(master), function(i){
-        master[[i]]$gtrack(name=names(master)[i], cex.label=2,
+        master[[i]]$gtrack(name=names(master)[i], border="black", lwd=1.5, stack.gap=2,
                            labels.suppress.grl=TRUE, labels.suppress=TRUE)}))
-    ppdf(plot(p.nol, e$e.gr), width=10, height=14,
+    ppdf(plot(p.nol, e$e.gr,legend.params=list(plot=FALSE)), width=10, height=14,
          filename=paste0(PLOTDIR, "master_kars_unlabeled_", pr, "_", eid, ".pdf"))
 
     list(summary = data.table(pair=pr, ev.id=eid, sample=names(sll),
